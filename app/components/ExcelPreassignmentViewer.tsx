@@ -5,6 +5,28 @@ import Image from "next/image";
 import JSZip from "jszip";
 import { parsePreassignments, type PreasignacionRow } from "../lib/excel";
 
+const MAX_XLSX_SIZE_BYTES = 10 * 1024 * 1024;
+
+function hasSupportedExcelSignature(buffer: ArrayBuffer, fileName: string) {
+  const bytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 8));
+
+  if (/\.xlsx$/i.test(fileName)) {
+    return (
+      bytes.length >= 4 &&
+      bytes[0] === 0x50 &&
+      bytes[1] === 0x4b &&
+      bytes[2] === 0x03 &&
+      bytes[3] === 0x04
+    );
+  }
+
+  const xlsSignature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  return (
+    bytes.length === xlsSignature.length &&
+    xlsSignature.every((byte, index) => bytes[index] === byte)
+  );
+}
+
 function formatNumber(value: number | null) {
   if (value === null) {
     return "—";
@@ -26,21 +48,39 @@ export default function ExcelPreassignmentViewer() {
     }
 
     if (!/\.(xls|xlsx)$/i.test(file.name)) {
-      setStatus("El archivo debe ser un Excel .xls o .xlsx.");
+      setStatus("El archivo debe tener formato .xls o .xlsx.");
       setRows([]);
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > MAX_XLSX_SIZE_BYTES) {
+      setStatus("El archivo supera el límite permitido de 10 MB.");
+      setRows([]);
+      event.target.value = "";
       return;
     }
 
     try {
       setStatus("Leyendo archivo...");
       const buffer = await file.arrayBuffer();
+
+      if (!hasSupportedExcelSignature(buffer, file.name)) {
+        throw new Error("El archivo no tiene una estructura Excel válida.");
+      }
+
       const parsedRows = parsePreassignments(buffer);
       setRows(parsedRows);
       setStatus(`Se procesaron ${parsedRows.length} filas del archivo.`);
     } catch (error) {
       console.error(error);
-      setStatus("No se pudo leer el archivo. Intenta con otro archivo o formato.");
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "No se pudo leer el archivo. Intenta con otro archivo.",
+      );
       setRows([]);
+      event.target.value = "";
     }
   }
 
@@ -92,6 +132,10 @@ export default function ExcelPreassignmentViewer() {
       const headerRow = 8;
       const dataStartRow = headerRow + 1; // 9
       let sheetXml = await zip.file(sheetPath)!.async('string');
+      sheetXml = sheetXml.replace(
+        /(<col min="4" max="4" width=")[^"]+(")/,
+        (_match, prefix, suffix) => `${prefix}23${suffix}`,
+      );
       let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
       const initialSharedStringCount = Number(sharedStringsXml.match(/\bcount="(\d+)"/)?.[1] ?? 0);
       const initialUniqueCount = Number(sharedStringsXml.match(/\buniqueCount="(\d+)"/)?.[1] ?? 0);

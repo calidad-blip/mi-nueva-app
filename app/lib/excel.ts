@@ -1,5 +1,10 @@
 import * as XLSX from "xlsx";
 
+const MAX_SHEETS = 20;
+const MAX_ROWS = 50_000;
+const MAX_COLUMNS = 100;
+const MAX_CELL_LENGTH = 10_000;
+
 export type PreasignacionRow = {
   cantidadSolicitada: number | null;
   cantidadPreasignada: number | null;
@@ -11,11 +16,47 @@ export type PreasignacionRow = {
 };
 
 export function parsePreassignments(buffer: ArrayBuffer): PreasignacionRow[] {
-  const workbook = XLSX.read(buffer, { type: "array" });
+  let workbook: XLSX.WorkBook;
+
+  try {
+    workbook = XLSX.read(buffer, { type: "array" });
+  } catch {
+    throw new Error("El archivo XLSX está dañado o no se puede interpretar.");
+  }
+
+  if (workbook.SheetNames.length > MAX_SHEETS) {
+    throw new Error(`El archivo supera el límite de ${MAX_SHEETS} hojas.`);
+  }
+
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
   if (!sheet) {
     return [];
+  }
+
+  const sheetReference = sheet["!ref"];
+
+  if (!sheetReference) {
+    return [];
+  }
+
+  let range: XLSX.Range;
+
+  try {
+    range = XLSX.utils.decode_range(sheetReference);
+  } catch {
+    throw new Error("La hoja principal contiene un rango inválido.");
+  }
+
+  const rowCount = range.e.r - range.s.r + 1;
+  const columnCount = range.e.c - range.s.c + 1;
+
+  if (rowCount > MAX_ROWS) {
+    throw new Error(`La hoja supera el límite de ${MAX_ROWS.toLocaleString("es-AR")} filas.`);
+  }
+
+  if (columnCount > MAX_COLUMNS) {
+    throw new Error(`La hoja supera el límite de ${MAX_COLUMNS} columnas.`);
   }
 
   const rows = XLSX.utils.sheet_to_json(sheet, {
@@ -26,6 +67,14 @@ export function parsePreassignments(buffer: ArrayBuffer): PreasignacionRow[] {
 
   if (rows.length === 0) {
     return [];
+  }
+
+  if (
+    rows.some((row) =>
+      row.some((cell) => String(cell ?? "").length > MAX_CELL_LENGTH),
+    )
+  ) {
+    throw new Error("El archivo contiene una celda excesivamente extensa.");
   }
 
   return rows
