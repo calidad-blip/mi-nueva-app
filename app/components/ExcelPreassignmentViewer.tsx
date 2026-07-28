@@ -53,9 +53,7 @@ export default function ExcelPreassignmentViewer() {
 
       const hayMatch =
         row.clienteNumero.toLowerCase().includes(normalizedSearch) ||
-        row.clienteNombre.toLowerCase().includes(normalizedSearch) ||
-        row.codigoProducto.toLowerCase().includes(normalizedSearch) ||
-        row.nombreProducto.toLowerCase().includes(normalizedSearch);
+        row.clienteNombre.toLowerCase().includes(normalizedSearch);
 
       return hayMatch;
     });
@@ -124,7 +122,7 @@ export default function ExcelPreassignmentViewer() {
           return `<c r="${address}"${styleAttribute} t="n"><v>${value}</v></c>`;
         }
         if (value === '') return `<c r="${address}"${styleAttribute}/>`;
-        return `<c r="${address}"${styleAttribute} t="s"><v>${sharedStringIndex(value)}</v></c>`;
+        return `<c r="${address}"${styleAttribute} t="s"><v>${sharedStringIndex(String(value))}</v></c>`;
       }
 
       function setCell(address: string, value: string | number, style?: number) {
@@ -176,12 +174,14 @@ export default function ExcelPreassignmentViewer() {
       });
 
       const lastDataRow = dataStartRow + filteredRows.length - 1;
-      const lastSheetRow = Math.max(30, lastDataRow);
-      const lastTableRow = Math.max(37, lastDataRow);
+      const rowPattern = /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g;
+      sheetXml = sheetXml.replace(rowPattern, (rowXml, rowNumber) =>
+        Number(rowNumber) > lastDataRow ? '' : rowXml
+      );
       sheetXml = sheetXml
-        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:F${lastSheetRow}"`)
-        .replace(/<sortState ref="A9:D\d+"/, `<sortState ref="A9:D${lastTableRow}"`)
-        .replace(/<sortCondition ref="B9:B\d+"/, `<sortCondition ref="B9:B${lastTableRow}"`);
+        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:F${lastDataRow}"`)
+        .replace(/<sortState ref="A9:D\d+"/, `<sortState ref="A9:D${lastDataRow}"`)
+        .replace(/<sortCondition ref="B9:B\d+"/, `<sortCondition ref="B9:B${lastDataRow}"`);
 
       const addedSharedStrings = Array.from(newSharedStrings.keys())
         .map((value) => `<si><t xml:space="preserve">${escapeXml(value)}</t></si>`)
@@ -195,7 +195,7 @@ export default function ExcelPreassignmentViewer() {
       const tableFile = zip.file(tablePath);
       if (tableFile) {
         const tableXml = (await tableFile.async('string'))
-          .replace(/\bref="A8:D\d+"/, `ref="A8:D${lastTableRow}"`);
+          .replace(/\bref="A8:D\d+"/, `ref="A8:D${lastDataRow}"`);
         zip.file(tablePath, tableXml);
       }
 
