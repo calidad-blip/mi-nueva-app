@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useMemo, useState } from "react";
+import Image from "next/image";
 import JSZip from "jszip";
 import { parsePreassignments, type PreasignacionRow } from "../lib/excel";
 
@@ -207,7 +208,7 @@ export default function ExcelPreassignmentViewer() {
 
       const numeroCliente = filteredRows[0]?.clienteNumero || 'cliente';
       const nombreCliente = filteredRows[0]?.clienteNombre || 'sinnombre';
-      const nombreArchivo = `${numeroCliente} ${nombreCliente}`.replace(/[^a-zA-Z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').toLowerCase();
+      const nombreArchivo = `${numeroCliente} ${nombreCliente}`.replace(/[^a-zA-Z0-9]+/g, ' ').trim().replace(/\s+/g, ' ').toUpperCase();
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -226,14 +227,41 @@ export default function ExcelPreassignmentViewer() {
     <main className="min-h-screen bg-[#f5f5f5] px-4 py-10 text-slate-700 sm:px-6 lg:px-8">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 rounded-3xl border border-[#d9d9d9] bg-white p-6 shadow-[0_12px_40px_rgba(0,0,0,0.08)]">
         <header className="space-y-2">
+          <div className="flex items-start justify-between gap-4">
+            <Image
+              src="/LOGO.svg"
+              alt="Logo"
+              width={585}
+              height={217}
+              priority
+              className="h-auto w-full max-w-[260px]"
+            />
+            <Image
+              src="/MEC.svg"
+              alt="MEC"
+              width={981}
+              height={1205}
+              priority
+              className="h-auto w-[70px] shrink-0 sm:w-[90px]"
+            />
+          </div>
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-[#d9534f]">
             Revisión de pendientes
           </p>
-          <h1 className="text-3xl font-semibold sm:text-4xl text-[#333333]">
-            ADMINISTRACIÓN Y VENTAS
-          </h1>
+          <div className="flex items-center justify-between gap-4">
+            <h1 className="text-3xl font-semibold sm:text-4xl text-[#333333]">
+              ADMINISTRACIÓN Y VENTAS
+            </h1>
+            <Image
+              src="/ISO.svg"
+              alt="Certificación ISO"
+              width={1434}
+              height={725}
+              className="h-auto w-[110px] shrink-0 sm:w-[150px]"
+            />
+          </div>
           <p className="max-w-3xl text-sm text-slate-600 sm:text-base">
-            Sube un archivo de excel desde PRESEA para comenzar
+            Sube un archivo de Excel desde PRESEA para revisar los pendientes y luego filtra por número o nombre del cliente
           </p>
         </header>
 
