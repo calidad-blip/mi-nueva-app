@@ -90,91 +90,80 @@ export default function ExcelPreassignmentViewer() {
       if (!relMatch) throw new Error('No se pudo resolver la relación de la hoja');
       const sheetPath = 'xl/' + relMatch[1].replace(/^\//, '');
 
-      const sheetXml = await zip.file(sheetPath)!.async('string');
-      const doc = parser.parseFromString(sheetXml, 'application/xml');
-
-      const sheetData = doc.getElementsByTagName('sheetData')[0];
-      if (!sheetData) throw new Error('sheetData no encontrado en la plantilla');
-
       const headerRow = 8;
       const dataStartRow = headerRow + 1; // 9
+      let sheetXml = await zip.file(sheetPath)!.async('string');
+      let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
+      const initialSharedStringCount = Number(sharedStringsXml.match(/\bcount="(\d+)"/)?.[1] ?? 0);
+      const initialUniqueCount = Number(sharedStringsXml.match(/\buniqueCount="(\d+)"/)?.[1] ?? 0);
+      const newSharedStrings = new Map<string, number>();
+      let stringReferenceCount = 0;
 
-      function getCellNode(address: string) {
-        const cells = doc.getElementsByTagName('c');
-        for (let i = 0; i < cells.length; i++) {
-          const c = cells[i];
-          if (c.getAttribute('r') === address) return c;
-        }
-        return null;
+      function escapeXml(value: string) {
+        return value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
       }
 
-      function ensureRow(rowNum: number) {
-        const existingRows = sheetData.getElementsByTagName('row');
-        for (let i = 0; i < existingRows.length; i++) {
-          if (existingRows[i].getAttribute('r') === String(rowNum)) return existingRows[i];
-        }
-        const newRow = doc.createElement('row');
-        newRow.setAttribute('r', String(rowNum));
-        sheetData.appendChild(newRow);
-        return newRow;
+      function sharedStringIndex(value: string) {
+        stringReferenceCount += 1;
+        const existingIndex = newSharedStrings.get(value);
+        if (existingIndex !== undefined) return existingIndex;
+
+        const index = initialUniqueCount + newSharedStrings.size;
+        newSharedStrings.set(value, index);
+        return index;
       }
 
-      function setCell(address: string, value: string | number, copyStyleFrom?: string | null) {
-        const rowNum = parseInt(address.replace(/[^0-9]/g, ''), 10);
-        let cell = getCellNode(address);
-        let styleAttr: string | null = null;
-        if (copyStyleFrom) {
-          const tpl = getCellNode(copyStyleFrom);
-          if (tpl && tpl.getAttribute('s')) styleAttr = tpl.getAttribute('s');
+      function cellXml(address: string, value: string | number, style?: number) {
+        const styleAttribute = style === undefined ? '' : ` s="${style}"`;
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          return `<c r="${address}"${styleAttribute} t="n"><v>${value}</v></c>`;
+        }
+        if (value === '') return `<c r="${address}"${styleAttribute}/>`;
+        return `<c r="${address}"${styleAttribute} t="s"><v>${sharedStringIndex(value)}</v></c>`;
+      }
+
+      function setCell(address: string, value: string | number, style?: number) {
+        const rowNumber = Number(address.match(/\d+/)?.[0]);
+        const replacement = cellXml(address, value, style);
+        const rowPattern = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*>[\\s\\S]*?<\\/row>`);
+        const rowMatch = sheetXml.match(rowPattern);
+
+        if (!rowMatch) {
+          const newRow = `<row r="${rowNumber}">${replacement}</row>`;
+          sheetXml = sheetXml.replace('</sheetData>', `${newRow}</sheetData>`);
+          return;
         }
 
-        if (!cell) {
-          const rowNode = ensureRow(rowNum);
-          cell = doc.createElement('c');
-          cell.setAttribute('r', address);
-          if (styleAttr) cell.setAttribute('s', styleAttr);
-          rowNode.appendChild(cell);
-        }
-
-        // remove existing children
-        while (cell.firstChild) cell.removeChild(cell.firstChild);
-
-        if (typeof value === 'number' && !Number.isNaN(value)) {
-          cell.setAttribute('t', 'n');
-          const v = doc.createElement('v');
-          v.textContent = String(value);
-          cell.appendChild(v);
+        const cellPattern = new RegExp(`<c\\b[^>]*\\br="${address}"(?:\\s[^>]*)?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+        let updatedRow = rowMatch[0];
+        if (cellPattern.test(updatedRow)) {
+          updatedRow = updatedRow.replace(cellPattern, replacement);
         } else {
-          cell.setAttribute('t', 'inlineStr');
-          const is = doc.createElement('is');
-          const t = doc.createElement('t');
-          // preserve whitespace
-          t.setAttribute('xml:space', 'preserve');
-          t.textContent = String(value);
-          is.appendChild(t);
-          cell.appendChild(is);
+          const followingCellPattern = new RegExp(`(?=<c\\b[^>]*\\br="[E-Z]${rowNumber}")`);
+          updatedRow = followingCellPattern.test(updatedRow)
+            ? updatedRow.replace(followingCellPattern, replacement)
+            : updatedRow.replace('</row>', `${replacement}</row>`);
         }
+        sheetXml = sheetXml.replace(rowPattern, updatedRow);
       }
 
       // Write client info into B5 and B6
       const clienteVal = filteredRows[0]?.clienteNombre || '';
       const numeroVal = filteredRows[0]?.clienteNumero || '';
-      // choose template style cells if exist (B5/B6 or fallback A5/A6)
-      const tplCliente = 'B5';
-      const tplNumero = 'B6';
-      const fallbackCliente = 'A5';
-      const fallbackNumero = 'A6';
-      const clienteStyleFrom = getCellNode(tplCliente) ? tplCliente : (getCellNode(fallbackCliente) ? fallbackCliente : null);
-      const numeroStyleFrom = getCellNode(tplNumero) ? tplNumero : (getCellNode(fallbackNumero) ? fallbackNumero : null);
-      setCell('B5', clienteVal, clienteStyleFrom);
-      setCell('B6', numeroVal, numeroStyleFrom);
+      setCell('B5', clienteVal, 4);
+      setCell('B6', numeroVal, 5);
 
       // Fill data rows starting at dataStartRow
       filteredRows.forEach((row, idx) => {
         const r = dataStartRow + idx; // 9+
         const vals = [
-          (row.codigoProducto || '').toUpperCase(),
-          (row.nombreProducto || '').toUpperCase(),
+          row.codigoProducto || '',
+          row.nombreProducto || '',
           row.cantidadPreasignada ?? '',
           row.preasignado ? 'LISTO PARA DESPACHAR' : '',
         ];
@@ -182,15 +171,36 @@ export default function ExcelPreassignmentViewer() {
         vals.forEach((val, colIdx) => {
           const colLetter = String.fromCharCode(65 + colIdx); // A,B,C,D
           const addr = `${colLetter}${r}`;
-          // try copy style from template data row (row 9) else header row
-          const styleFrom = getCellNode(`${colLetter}${dataStartRow}`) ? `${colLetter}${dataStartRow}` : `${colLetter}${headerRow}`;
-          setCell(addr, val, styleFrom);
+          setCell(addr, val);
         });
       });
 
-      const serializer = new XMLSerializer();
-      const updatedSheetXml = serializer.serializeToString(doc);
-      zip.file(sheetPath, updatedSheetXml);
+      const lastDataRow = dataStartRow + filteredRows.length - 1;
+      const lastSheetRow = Math.max(30, lastDataRow);
+      const lastTableRow = Math.max(37, lastDataRow);
+      sheetXml = sheetXml
+        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:F${lastSheetRow}"`)
+        .replace(/<sortState ref="A9:D\d+"/, `<sortState ref="A9:D${lastTableRow}"`)
+        .replace(/<sortCondition ref="B9:B\d+"/, `<sortCondition ref="B9:B${lastTableRow}"`);
+
+      const addedSharedStrings = Array.from(newSharedStrings.keys())
+        .map((value) => `<si><t xml:space="preserve">${escapeXml(value)}</t></si>`)
+        .join('');
+      sharedStringsXml = sharedStringsXml
+        .replace(/\bcount="\d+"/, `count="${initialSharedStringCount + stringReferenceCount}"`)
+        .replace(/\buniqueCount="\d+"/, `uniqueCount="${initialUniqueCount + newSharedStrings.size}"`)
+        .replace('</sst>', `${addedSharedStrings}</sst>`);
+
+      const tablePath = 'xl/tables/table1.xml';
+      const tableFile = zip.file(tablePath);
+      if (tableFile) {
+        const tableXml = (await tableFile.async('string'))
+          .replace(/\bref="A8:D\d+"/, `ref="A8:D${lastTableRow}"`);
+        zip.file(tablePath, tableXml);
+      }
+
+      zip.file(sheetPath, sheetXml);
+      zip.file('xl/sharedStrings.xml', sharedStringsXml);
 
       const outArray = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
       const blob = new Blob([outArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
