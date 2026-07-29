@@ -93,7 +93,7 @@ export default function ExcelPreassignmentViewer() {
       }
 
       const hayMatch =
-        row.clienteNumero.toLowerCase().includes(normalizedSearch) ||
+        row.clienteNumero.toLowerCase() === normalizedSearch ||
         row.clienteNombre.toLowerCase().includes(normalizedSearch);
 
       return hayMatch;
