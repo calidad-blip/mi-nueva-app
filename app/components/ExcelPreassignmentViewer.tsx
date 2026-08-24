@@ -36,27 +36,37 @@ function formatNumber(value: number | null) {
 }
 
 export default function ExcelPreassignmentViewer() {
-  const [rows, setRows] = useState<PreasignacionRow[]>([]);
+  const [fileRows, setFileRows] = useState<[PreasignacionRow[], PreasignacionRow[]]>([[], []]);
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("Sube un archivo Excel para revisar las preasignaciones.");
+  const [status, setStatus] = useState("REVISIÓN DE PREASIGNACIONES");
+  const [loadedFileNames, setLoadedFileNames] = useState<[string | null, string | null]>([null, null]);
+  const rows = useMemo(() => fileRows.flat(), [fileRows]);
 
-  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>, fileIndex: 0 | 1) {
     const file = event.target.files?.[0];
 
     if (!file) {
       return;
     }
 
+    setLoadedFileNames((current) =>
+      current.map((name, index) => index === fileIndex ? null : name) as [string | null, string | null],
+    );
+
     if (!/\.(xls|xlsx)$/i.test(file.name)) {
       setStatus("El archivo debe tener formato .xls o .xlsx.");
-      setRows([]);
+      setFileRows((current) =>
+        current.map((items, index) => index === fileIndex ? [] : items) as [PreasignacionRow[], PreasignacionRow[]],
+      );
       event.target.value = "";
       return;
     }
 
     if (file.size > MAX_XLSX_SIZE_BYTES) {
       setStatus("El archivo supera el límite permitido de 10 MB.");
-      setRows([]);
+      setFileRows((current) =>
+        current.map((items, index) => index === fileIndex ? [] : items) as [PreasignacionRow[], PreasignacionRow[]],
+      );
       event.target.value = "";
       return;
     }
@@ -69,8 +79,13 @@ export default function ExcelPreassignmentViewer() {
         throw new Error("El archivo no tiene una estructura Excel válida.");
       }
 
-      const parsedRows = parsePreassignments(buffer);
-      setRows(parsedRows);
+      const parsedRows = await parsePreassignments(buffer);
+      setFileRows((current) =>
+        current.map((items, index) => index === fileIndex ? parsedRows : items) as [PreasignacionRow[], PreasignacionRow[]],
+      );
+      setLoadedFileNames((current) =>
+        current.map((name, index) => index === fileIndex ? file.name : name) as [string | null, string | null],
+      );
       setStatus(`Se procesaron ${parsedRows.length} filas del archivo.`);
     } catch (error) {
       console.error(error);
@@ -79,7 +94,9 @@ export default function ExcelPreassignmentViewer() {
           ? error.message
           : "No se pudo leer el archivo. Intenta con otro archivo.",
       );
-      setRows([]);
+      setFileRows((current) =>
+        current.map((items, index) => index === fileIndex ? [] : items) as [PreasignacionRow[], PreasignacionRow[]],
+      );
       event.target.value = "";
     }
   }
@@ -132,11 +149,22 @@ export default function ExcelPreassignmentViewer() {
       const headerRow = 8;
       const dataStartRow = headerRow + 1; // 9
       let sheetXml = await zip.file(sheetPath)!.async('string');
-      sheetXml = sheetXml.replace(
-        /(<col min="4" max="4" width=")[^"]+(")/,
-        (_match, prefix, suffix) => `${prefix}23${suffix}`,
-      );
       let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
+      let stylesXml = await zip.file('xl/styles.xml')!.async('string');
+      const cellStyleCount = Number(stylesXml.match(/<cellXfs\b[^>]*\bcount="(\d+)"/)?.[1]);
+      if (!Number.isFinite(cellStyleCount)) {
+        throw new Error('No se pudieron leer los estilos de la plantilla');
+      }
+      const totalCellStyle = cellStyleCount;
+      stylesXml = stylesXml
+        .replace(
+          /(<cellXfs\b[^>]*\bcount=")\d+("[^>]*>)/,
+          `$1${cellStyleCount + 1}$2`,
+        )
+        .replace(
+          '</cellXfs>',
+          '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs>',
+        );
       const initialSharedStringCount = Number(sharedStringsXml.match(/\bcount="(\d+)"/)?.[1] ?? 0);
       const initialUniqueCount = Number(sharedStringsXml.match(/\buniqueCount="(\d+)"/)?.[1] ?? 0);
       const newSharedStrings = new Map<string, number>();
@@ -201,31 +229,78 @@ export default function ExcelPreassignmentViewer() {
       setCell('B5', clienteVal, 4);
       setCell('B6', numeroVal, 5);
 
+
+      const columnWidths = ['CODIGO', 'DETALLE', 'CANTIDAD', 'PREASIGNADO', 'ESTADO']
+        .map((header) => header.length);
+      const fixedColumnWidths: Array<number | null> = [10, null, 10, 14, 24];
+      const dataColumnStyles = [2, 5, 2, 2, 2]; // B left; A and C-E centered
+
       // Fill data rows starting at dataStartRow
       filteredRows.forEach((row, idx) => {
         const r = dataStartRow + idx; // 9+
         const vals = [
           row.codigoProducto || '',
           row.nombreProducto || '',
+          row.cantidadSolicitada ?? '',
           row.cantidadPreasignada ?? '',
           row.preasignado ? 'LISTO PARA DESPACHAR' : '',
         ];
 
         vals.forEach((val, colIdx) => {
-          const colLetter = String.fromCharCode(65 + colIdx); // A,B,C,D
+          columnWidths[colIdx] = Math.max(columnWidths[colIdx], String(val).length);
+          const colLetter = String.fromCharCode(65 + colIdx); // A,B,C,D,E
           const addr = `${colLetter}${r}`;
-          setCell(addr, val);
+          setCell(addr, val, dataColumnStyles[colIdx]);
         });
       });
 
+
+      columnWidths.forEach((contentLength, colIdx) => {
+        const columnNumber = colIdx + 1;
+        const width = fixedColumnWidths[colIdx] ?? Math.min(Math.max(contentLength + 2, 10), 255);
+        const columnPattern = new RegExp(
+          `<col\\b(?=[^>]*\\bmin="${columnNumber}")(?=[^>]*\\bmax="${columnNumber}")[^>]*/>`,
+        );
+        sheetXml = sheetXml.replace(columnPattern, (columnXml) =>
+          columnXml.replace(/\bwidth="[^"]*"/, `width="${width}"`),
+        );
+      });
       const lastDataRow = dataStartRow + filteredRows.length - 1;
+      const totalRow = lastDataRow + 1;
+      const totalPreasignado = filteredRows.reduce(
+        (total, row) => total + (row.cantidadPreasignada ?? 0),
+        0,
+      );
       const rowPattern = /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g;
       sheetXml = sheetXml.replace(rowPattern, (rowXml, rowNumber) =>
         Number(rowNumber) > lastDataRow ? '' : rowXml
       );
+
+      setCell(`A${totalRow}`, 'TOTAL ARTÍCULOS A DESPACHAR', totalCellStyle);
+      setCell(`D${totalRow}`, totalPreasignado, totalCellStyle);
+
+      const totalMergeRef = `A${totalRow}:C${totalRow}`;
+      if (/<mergeCells\b[^>]*>/.test(sheetXml)) {
+        sheetXml = sheetXml.replace(
+          /<mergeCells\b([^>]*)>([\s\S]*?)<\/mergeCells>/,
+          (_mergeCellsXml, attributes, mergeCells) => {
+            const currentCount = Number(String(attributes).match(/\bcount="(\d+)"/)?.[1] ?? 0);
+            const updatedAttributes = /\bcount="\d+"/.test(attributes)
+              ? String(attributes).replace(/\bcount="\d+"/, `count="${currentCount + 1}"`)
+              : `${attributes} count="${currentCount + 1}"`;
+            return `<mergeCells${updatedAttributes}>${mergeCells}<mergeCell ref="${totalMergeRef}"/></mergeCells>`;
+          },
+        );
+      } else {
+        sheetXml = sheetXml.replace(
+          /(?=<pageMargins\b)/,
+          `<mergeCells count="1"><mergeCell ref="${totalMergeRef}"/></mergeCells>`,
+        );
+      }
+
       sheetXml = sheetXml
-        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:F${lastDataRow}"`)
-        .replace(/<sortState ref="A9:D\d+"/, `<sortState ref="A9:D${lastDataRow}"`)
+        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:G${totalRow}"`)
+        .replace(/<sortState ref="A9:[A-Z]+\d+"/, `<sortState ref="A9:E${lastDataRow}"`)
         .replace(/<sortCondition ref="B9:B\d+"/, `<sortCondition ref="B9:B${lastDataRow}"`);
 
       const addedSharedStrings = Array.from(newSharedStrings.keys())
@@ -240,12 +315,13 @@ export default function ExcelPreassignmentViewer() {
       const tableFile = zip.file(tablePath);
       if (tableFile) {
         const tableXml = (await tableFile.async('string'))
-          .replace(/\bref="A8:D\d+"/, `ref="A8:D${lastDataRow}"`);
+          .replace(/\bref="A8:[A-Z]+\d+"/, `ref="A8:E${lastDataRow}"`);
         zip.file(tablePath, tableXml);
       }
 
       zip.file(sheetPath, sheetXml);
       zip.file('xl/sharedStrings.xml', sharedStringsXml);
+      zip.file('xl/styles.xml', stylesXml);
 
       const outArray = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
       const blob = new Blob([outArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -269,8 +345,8 @@ export default function ExcelPreassignmentViewer() {
 
   return (
     <main className="min-h-screen bg-[#f5f5f5] px-4 py-10 text-slate-700 sm:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 rounded-3xl border border-[#d9d9d9] bg-white p-6 shadow-[0_12px_40px_rgba(0,0,0,0.08)]">
-        <header className="space-y-2">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6">
+        <header className="space-y-2 rounded-[2rem] border border-slate-200 bg-white p-6 shadow-lg sm:p-8">
           <div className="flex items-start justify-between gap-4">
             <Image
               src="/LOGO.svg"
@@ -305,47 +381,54 @@ export default function ExcelPreassignmentViewer() {
             />
           </div>
           <p className="max-w-3xl text-sm text-slate-600 sm:text-base">
-            Sube un archivo de Excel desde PRESEA para revisar los pendientes y luego filtra por número o nombre del cliente
+            Sube archivo/s de Excel desde PRESEA con la extensión .xls o .xlsx para revisar los pendientes. Luego filtra por número o nombre del cliente para poder visualizarlo de una manera más fácil.
           </p>
         </header>
 
-        <section className="grid gap-4 rounded-2xl border border-[#e5e5e5] bg-[#fafafa] p-4 md:grid-cols-[1.2fr_0.8fr]">
-          <label className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-slate-700">Archivo Excel</span>
-            <label className="flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-[#c7c7c7] bg-white px-3 py-3 text-sm text-slate-700 hover:bg-[#fdf5eb]">
-              <span className="rounded-full bg-[#f28c28] px-4 py-2 text-sm font-semibold text-white">
-                Seleccione archivo de excel
-              </span>
-              <input
-                type="file"
-                accept=".xls,.xlsx"
-                onChange={handleFileChange}
-                className="sr-only"
-              />
-            </label>
-          </label>
+        <section className="grid gap-10 rounded-[2rem] border border-slate-200 bg-white p-6 shadow-lg sm:p-8">
+          <div className="flex flex-col gap-2">
+            <span className="text-lg font-extrabold uppercase tracking-[0.08em] text-[#EE4B25] sm:text-xl">CARGA DE ARCHIVOS EXCEL</span>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {([0, 1] as const).map((fileIndex) => (
+                <div key={fileIndex}>
+                  <label className="block w-full cursor-pointer rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-center text-sm font-semibold text-slate-900 shadow-sm transition hover:border-orange-400">
+                    {fileIndex === 0
+                      ? "Excel CMF, CAE, CPE"
+                      : "Excel CR"}
+                    <input
+                      type="file"
+                      accept=".xls,.xlsx"
+                      onChange={(event) => handleFileChange(event, fileIndex)}
+                      className="sr-only"
+                    />
+                  </label>
+                  {loadedFileNames[fileIndex] && (
+                    <p className="mt-2 text-center text-sm text-green-600">
+                      Archivo cargado correctamente: {loadedFileNames[fileIndex]}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
 
           <label className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-slate-700">Buscar por cliente</span>
-            <div className="relative flex min-h-[52px] w-full items-center rounded-xl border border-dashed border-[#c7c7c7] bg-white px-3 py-3 text-sm text-slate-700 hover:bg-[#fdf5eb]">
+            <span className="text-lg font-extrabold uppercase tracking-[0.08em] text-[#EE4B25] sm:text-xl">BUSCAR POR CLIENTE</span>
+            <div className="w-full">
               <input
                 type="text"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                className="w-full bg-transparent text-sm text-slate-700 outline-none ring-0"
+                placeholder="Número o nombre del cliente"
+                className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-center text-sm font-semibold text-slate-900 shadow-sm outline-none transition placeholder:text-slate-900 hover:border-orange-400 focus:border-orange-400 focus:ring-2 focus:ring-orange-100"
               />
-              {!search && (
-                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-[#f28c28] px-3 py-1 text-xs font-semibold text-white">
-                  Número o nombre del cliente
-                </span>
-              )}
             </div>
           </label>
         </section>
 
-        <section className="rounded-2xl border border-[#e5e5e5] bg-[#fafafa] p-4">
+        <section className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-lg sm:p-8">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm text-slate-600">{status}</p>
+            <p className="text-lg font-extrabold uppercase tracking-[0.08em] text-[#EE4B25] sm:text-xl">{status}</p>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
