@@ -128,7 +128,7 @@ export default function ExcelPreassignmentViewer() {
     setStatus('Generando archivo (preservando plantilla)...');
 
     try {
-      const resp = await fetch('/375%20pendientes.xlsx');
+      const resp = await fetch('/ET.xlsx');
       if (!resp.ok) throw new Error('No se pudo descargar la plantilla');
       const arrayBuffer = await resp.arrayBuffer();
 
