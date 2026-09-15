@@ -120,11 +120,6 @@ export default function ExcelPreassignmentViewer() {
   }, [rows, search]);
 
   async function handleDownloadExcel() {
-    if (filteredRows.length === 0) {
-      setStatus("No hay resultados para descargar.");
-      return;
-    }
-
     setStatus('Generando archivo (preservando plantilla)...');
 
     try {
@@ -146,25 +141,10 @@ export default function ExcelPreassignmentViewer() {
       if (!relMatch) throw new Error('No se pudo resolver la relación de la hoja');
       const sheetPath = 'xl/' + relMatch[1].replace(/^\//, '');
 
-      const headerRow = 8;
-      const dataStartRow = headerRow + 1; // 9
+      const headerRow = 9;
+      const dataStartRow = headerRow + 1; // 10
       let sheetXml = await zip.file(sheetPath)!.async('string');
       let sharedStringsXml = await zip.file('xl/sharedStrings.xml')!.async('string');
-      let stylesXml = await zip.file('xl/styles.xml')!.async('string');
-      const cellStyleCount = Number(stylesXml.match(/<cellXfs\b[^>]*\bcount="(\d+)"/)?.[1]);
-      if (!Number.isFinite(cellStyleCount)) {
-        throw new Error('No se pudieron leer los estilos de la plantilla');
-      }
-      const totalCellStyle = cellStyleCount;
-      stylesXml = stylesXml
-        .replace(
-          /(<cellXfs\b[^>]*\bcount=")\d+("[^>]*>)/,
-          `$1${cellStyleCount + 1}$2`,
-        )
-        .replace(
-          '</cellXfs>',
-          '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf></cellXfs>',
-        );
       const initialSharedStringCount = Number(sharedStringsXml.match(/\bcount="(\d+)"/)?.[1] ?? 0);
       const initialUniqueCount = Number(sharedStringsXml.match(/\buniqueCount="(\d+)"/)?.[1] ?? 0);
       const newSharedStrings = new Map<string, number>();
@@ -201,7 +181,7 @@ export default function ExcelPreassignmentViewer() {
       function setCell(address: string, value: string | number, style?: number) {
         const rowNumber = Number(address.match(/\d+/)?.[0]);
         const replacement = cellXml(address, value, style);
-        const rowPattern = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*>[\\s\\S]*?<\\/row>`);
+        const rowPattern = new RegExp(`<row\\b[^>]*\\br="${rowNumber}"[^>]*?(?:\\/>|>[\\s\\S]*?<\\/row>)`);
         const rowMatch = sheetXml.match(rowPattern);
 
         if (!rowMatch) {
@@ -211,13 +191,16 @@ export default function ExcelPreassignmentViewer() {
         }
 
         const cellPattern = new RegExp(`<c\\b[^>]*\\br="${address}"(?:\\s[^>]*)?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
-        let updatedRow = rowMatch[0];
+        let updatedRow = rowMatch[0].replace(/\/>$/, '></row>');
         if (cellPattern.test(updatedRow)) {
           updatedRow = updatedRow.replace(cellPattern, replacement);
         } else {
-          const followingCellPattern = new RegExp(`(?=<c\\b[^>]*\\br="[E-Z]${rowNumber}")`);
-          updatedRow = followingCellPattern.test(updatedRow)
-            ? updatedRow.replace(followingCellPattern, replacement)
+          const column = address.replace(/\d+$/, '');
+          const followingCell = Array.from(updatedRow.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"/g))
+            .find((match) => match[1].length > column.length ||
+              (match[1].length === column.length && match[1] > column));
+          updatedRow = followingCell
+            ? updatedRow.slice(0, followingCell.index) + replacement + updatedRow.slice(followingCell.index)
             : updatedRow.replace('</row>', `${replacement}</row>`);
         }
         sheetXml = sheetXml.replace(rowPattern, updatedRow);
@@ -232,12 +215,12 @@ export default function ExcelPreassignmentViewer() {
 
       const columnWidths = ['CODIGO', 'DETALLE', 'CANTIDAD', 'PREASIGNADO', 'ESTADO']
         .map((header) => header.length);
-      const fixedColumnWidths: Array<number | null> = [10, null, 10, 14, 24];
+      const fixedColumnWidths: Array<number | null> = [null, null, 10, 14, 24];
       const dataColumnStyles = [2, 5, 2, 2, 2]; // B left; A and C-E centered
 
       // Fill data rows starting at dataStartRow
       filteredRows.forEach((row, idx) => {
-        const r = dataStartRow + idx; // 9+
+        const r = dataStartRow + idx; // 10+
         const vals = [
           row.codigoProducto || '',
           row.nombreProducto || '',
@@ -257,7 +240,7 @@ export default function ExcelPreassignmentViewer() {
 
       columnWidths.forEach((contentLength, colIdx) => {
         const columnNumber = colIdx + 1;
-        const width = fixedColumnWidths[colIdx] ?? Math.min(Math.max(contentLength + 2, 10), 255);
+        const width = fixedColumnWidths[colIdx] ?? Math.min(Math.max(contentLength + 2, colIdx === 0 ? 12 : 20), colIdx === 0 ? 18 : 55);
         const columnPattern = new RegExp(
           `<col\\b(?=[^>]*\\bmin="${columnNumber}")(?=[^>]*\\bmax="${columnNumber}")[^>]*/>`,
         );
@@ -266,42 +249,44 @@ export default function ExcelPreassignmentViewer() {
         );
       });
       const lastDataRow = dataStartRow + filteredRows.length - 1;
-      const totalRow = lastDataRow + 1;
       const totalPreasignado = filteredRows.reduce(
         (total, row) => total + (row.cantidadPreasignada ?? 0),
         0,
       );
-      const rowPattern = /<row\b[^>]*\br="(\d+)"[^>]*(?:\/>|>[\s\S]*?<\/row>)/g;
-      sheetXml = sheetXml.replace(rowPattern, (rowXml, rowNumber) =>
-        Number(rowNumber) > lastDataRow ? '' : rowXml
-      );
+      // Replace only D8's formula/cache, keeping its original formatting.
+      sheetXml = sheetXml.replace(/(<c\b[^>]*\br="D8"[^>]*>)[\s\S]*?<\/c>/,
+        (_cell, openingTag: string) =>
+          openingTag.replace(/\s+t="[^"]*"/, '') + '<v>' + totalPreasignado + '</v></c>');
 
-      setCell(`A${totalRow}`, 'TOTAL ARTÍCULOS A DESPACHAR', totalCellStyle);
-      setCell(`D${totalRow}`, totalPreasignado, totalCellStyle);
-
-      const totalMergeRef = `A${totalRow}:C${totalRow}`;
-      if (/<mergeCells\b[^>]*>/.test(sheetXml)) {
-        sheetXml = sheetXml.replace(
-          /<mergeCells\b([^>]*)>([\s\S]*?)<\/mergeCells>/,
-          (_mergeCellsXml, attributes, mergeCells) => {
-            const currentCount = Number(String(attributes).match(/\bcount="(\d+)"/)?.[1] ?? 0);
-            const updatedAttributes = /\bcount="\d+"/.test(attributes)
-              ? String(attributes).replace(/\bcount="\d+"/, `count="${currentCount + 1}"`)
-              : `${attributes} count="${currentCount + 1}"`;
-            return `<mergeCells${updatedAttributes}>${mergeCells}<mergeCell ref="${totalMergeRef}"/></mergeCells>`;
-          },
-        );
-      } else {
-        sheetXml = sheetXml.replace(
-          /(?=<pageMargins\b)/,
-          `<mergeCells count="1"><mergeCell ref="${totalMergeRef}"/></mergeCells>`,
-        );
+      // D8 is the template's only formula: remove only its calculation entry.
+      const calcChainPath = 'xl/calcChain.xml';
+      const calcChainFile = zip.file(calcChainPath);
+      if (calcChainFile) {
+        const calcChainXml = await calcChainFile.async('string');
+        const updatedCalcChain = calcChainXml.replace(/<c\b(?=[^>]*\br="D8")(?=[^>]*\bi="1")[^>]*\/>/, '');
+        if (updatedCalcChain !== calcChainXml) {
+          if (/<c\b/.test(updatedCalcChain)) {
+            zip.file(calcChainPath, updatedCalcChain);
+          } else {
+            zip.remove(calcChainPath);
+            zip.file('xl/_rels/workbook.xml.rels', relsXml.replace(/<Relationship\b(?=[^>]*\bType="[^"]*\/calcChain")[^>]*\/>/, ''));
+            const contentTypes = await zip.file('[Content_Types].xml')!.async('string');
+            zip.file('[Content_Types].xml', contentTypes.replace(/<Override\b(?=[^>]*\bPartName="\/xl\/calcChain.xml")[^>]*\/>/, ''));
+          }
+        }
       }
 
-      sheetXml = sheetXml
-        .replace(/<dimension ref="[^"]+"/, `<dimension ref="A2:G${totalRow}"`)
-        .replace(/<sortState ref="A9:[A-Z]+\d+"/, `<sortState ref="A9:E${lastDataRow}"`)
-        .replace(/<sortCondition ref="B9:B\d+"/, `<sortCondition ref="B9:B${lastDataRow}"`);
+      // Preserve existing rows and expand the used range only when needed.
+      sheetXml = sheetXml.replace(/<dimension ref="([A-Z]+\d+):([A-Z]+)(\d+)"/,
+        (_dimension, start: string, endColumn: string, endRow: string) =>
+          '<dimension ref="' + start + ':' + endColumn + Math.max(Number(endRow), lastDataRow) + '"');
+      if (filteredRows.length > 0) {
+        sheetXml = sheetXml
+          .replace(/<sortState ref="A10:[A-Z]+\d+"/, '<sortState ref="A10:E' + lastDataRow + '"')
+          .replace(/<sortCondition ref="B10:B\d+"/, '<sortCondition ref="B10:B' + lastDataRow + '"');
+      } else {
+        sheetXml = sheetXml.replace(/<sortState\b[^>]*>[\s\S]*?<\/sortState>/, '');
+      }
 
       const addedSharedStrings = Array.from(newSharedStrings.keys())
         .map((value) => `<si><t xml:space="preserve">${escapeXml(value)}</t></si>`)
@@ -315,13 +300,12 @@ export default function ExcelPreassignmentViewer() {
       const tableFile = zip.file(tablePath);
       if (tableFile) {
         const tableXml = (await tableFile.async('string'))
-          .replace(/\bref="A8:[A-Z]+\d+"/, `ref="A8:E${lastDataRow}"`);
+          .replace(/\bref="A9:[A-Z]+\d+"/, `ref="A9:E${lastDataRow}"`);
         zip.file(tablePath, tableXml);
       }
 
       zip.file(sheetPath, sheetXml);
       zip.file('xl/sharedStrings.xml', sharedStringsXml);
-      zip.file('xl/styles.xml', stylesXml);
 
       const outArray = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
       const blob = new Blob([outArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
