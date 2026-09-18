@@ -17,6 +17,68 @@ export type PreasignacionRow = {
   nombreProducto: string;
 };
 
+export type PreasignacionAgrupadaRow = PreasignacionRow & {
+  entregaParcial: boolean;
+  excedeCantidad: boolean;
+};
+
+export function groupPreassignmentsByClientAndCode(
+  rows: readonly PreasignacionRow[],
+): PreasignacionAgrupadaRow[] {
+  const result: PreasignacionAgrupadaRow[] = [];
+  const clients = new Map<string, Map<string, PreasignacionAgrupadaRow>>();
+  const finiteOrNull = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+
+  for (const row of rows) {
+    const requested = finiteOrNull(row.cantidadSolicitada);
+    const assigned = finiteOrNull(row.cantidadPreasignada);
+    const existing = row.clienteNumero && row.codigoProducto
+      ? clients.get(row.clienteNumero)?.get(row.codigoProducto)
+      : undefined;
+
+    if (existing) {
+      if (requested !== null) {
+        existing.cantidadSolicitada = (existing.cantidadSolicitada ?? 0) + requested;
+      }
+      if (assigned !== null) {
+        existing.cantidadPreasignada = (existing.cantidadPreasignada ?? 0) + assigned;
+      }
+      if (!existing.nombreProducto) existing.nombreProducto = row.nombreProducto;
+      continue;
+    }
+
+    const grouped = {
+      ...row,
+      cantidadSolicitada: requested,
+      cantidadPreasignada: assigned,
+      entregaParcial: false,
+      excedeCantidad: false,
+    };
+    result.push(grouped);
+    if (row.clienteNumero && row.codigoProducto) {
+      let products = clients.get(row.clienteNumero);
+      if (!products) {
+        products = new Map();
+        clients.set(row.clienteNumero, products);
+      }
+      products.set(row.codigoProducto, grouped);
+    }
+  }
+  // Derive the final state only after all quantities have been grouped.
+  for (const row of result) {
+    const requested = finiteOrNull(row.cantidadSolicitada);
+    const assigned = finiteOrNull(row.cantidadPreasignada);
+    row.entregaParcial = requested !== null && assigned !== null &&
+      assigned > 0 && assigned < requested;
+    row.preasignado = requested !== null && assigned !== null &&
+      requested > 0 && assigned === requested;
+    row.excedeCantidad = requested !== null && assigned !== null &&
+      requested >= 0 && assigned > requested;
+  }
+  return result;
+}
+
 export async function parsePreassignments(buffer: ArrayBuffer): Promise<PreasignacionRow[]> {
   const format = detectExcelFormat(buffer);
   if (format === "unknown") {

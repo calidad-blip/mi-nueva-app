@@ -3,9 +3,14 @@
 import { ChangeEvent, useMemo, useState } from "react";
 import Image from "next/image";
 import JSZip from "jszip";
-import { parsePreassignments, type PreasignacionRow } from "../lib/excel";
+import { groupPreassignmentsByClientAndCode, parsePreassignments, type PreasignacionRow } from "../lib/excel";
 
 const MAX_XLSX_SIZE_BYTES = 10 * 1024 * 1024;
+const codeCollator = new Intl.Collator("es", {
+  numeric: true,
+  sensitivity: "variant",
+  ignorePunctuation: false,
+});
 
 function hasSupportedExcelSignature(buffer: ArrayBuffer, fileName: string) {
   const bytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 8));
@@ -116,7 +121,11 @@ export default function ExcelPreassignmentViewer() {
       return hayMatch;
     });
 
-    return candidateRows;
+    return groupPreassignmentsByClientAndCode(candidateRows).sort((a, b) => {
+      if (!a.codigoProducto) return b.codigoProducto ? 1 : 0;
+      if (!b.codigoProducto) return -1;
+      return codeCollator.compare(a.codigoProducto, b.codigoProducto);
+    });
   }, [rows, search]);
 
   async function handleDownloadExcel() {
@@ -226,7 +235,7 @@ export default function ExcelPreassignmentViewer() {
           row.nombreProducto || '',
           row.cantidadSolicitada ?? '',
           row.cantidadPreasignada ?? '',
-          row.preasignado ? 'LISTO PARA DESPACHAR' : '',
+          row.excedeCantidad ? 'ERROR: EXCEDE CANTIDAD' : row.entregaParcial ? 'ENTREGA PARCIAL' : row.preasignado ? 'LISTO PARA DESPACHAR' : '',
         ];
 
         vals.forEach((val, colIdx) => {
@@ -250,7 +259,10 @@ export default function ExcelPreassignmentViewer() {
       });
       const lastDataRow = dataStartRow + filteredRows.length - 1;
       const totalPreasignado = filteredRows.reduce(
-        (total, row) => total + (row.cantidadPreasignada ?? 0),
+        (total, row) => total + (
+          typeof row.cantidadPreasignada === 'number' && Number.isFinite(row.cantidadPreasignada)
+            ? row.cantidadPreasignada : 0
+        ),
         0,
       );
       // Replace only D8's formula/cache, keeping its original formatting.
@@ -461,7 +473,7 @@ export default function ExcelPreassignmentViewer() {
                               : "bg-[#fff3e8] text-[#b85c00]"
                           }`}
                         >
-                          {row.preasignado ? "Preasignado" : "Sin preasignación"}
+                          {row.excedeCantidad ? "ERROR: EXCEDE CANTIDAD" : row.entregaParcial ? "ENTREGA PARCIAL" : row.preasignado ? "Preasignado" : "Sin preasignación"}
                         </span>
                       </td>
                       <td className="px-3 py-3">{formatNumber(row.cantidadPreasignada)}</td>
